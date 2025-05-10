@@ -104,9 +104,26 @@ def _create_raw_dollar_bars(
 
     raw_bars_df = pd.DataFrame(dollar_bars_list)
     if not raw_bars_df.empty:
-        # Ensure standard column order
+        # Ensure 'Open time' is a column
+        if "Open time" not in raw_bars_df.columns:
+            raw_bars_df = raw_bars_df.reset_index()
+        # Set 'Open time' as DatetimeIndex
+        raw_bars_df = raw_bars_df.set_index("Open time")
+        # Explicitly add 'Open time' back as a column
+        raw_bars_df["Open time"] = raw_bars_df.index
+        # Ensure standard column order and add 'NewDBFlag'
+        raw_bars_df["NewDBFlag"] = True
         raw_bars_df = raw_bars_df[
-            ["Open time", "Open", "High", "Low", "Close", "Volume", "Close time"]
+            [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume",
+                "Close time",
+                "NewDBFlag",
+                "Open time",
+            ]
         ]
     return raw_bars_df
 
@@ -128,103 +145,98 @@ def _simplify_number(num: float) -> str:
         return str(int(round(num)))
 
 
+def _manufacture_close_time(df: pd.DataFrame) -> pd.DataFrame:
+    """Manufacture a Close time column for the input DataFrame.
+
+    For time-based data (e.g., minutely, hourly), Close time is set to the end of the period.
+    For event-based data, Close time is set to Open time.
+
+    Args:
+        df: Input DataFrame with either a DatetimeIndex or 'Open time' column
+
+    Returns:
+        DataFrame with 'Close time' column added
+    """
+    df = df.copy()
+
+    # If we have a DatetimeIndex, use it as Open time
+    if isinstance(df.index, pd.DatetimeIndex):
+        open_times = df.index
+    else:
+        open_times = df["Open time"]
+
+    # Try to infer frequency from the index
+    try:
+        freq = pd.infer_freq(open_times)
+        if freq is not None:
+            # For time-based data, set Close time to end of period minus 1 microsecond
+            # This ensures no overlap with the next period
+            offset = pd.tseries.frequencies.to_offset(freq)
+            df["Close time"] = open_times + offset - pd.Timedelta(microseconds=1)
+        else:
+            # If we can't infer frequency, assume event-based data
+            # For event-based data, Close time should be the same as Open time
+            # to avoid any potential lookahead
+            df["Close time"] = open_times
+    except (ValueError, TypeError):
+        # If inference fails, assume event-based data
+        df["Close time"] = open_times
+
+    # Ensure Close times are timezone-aware if Open times are
+    if isinstance(open_times, pd.DatetimeIndex) and open_times.tz is not None:
+        df["Close time"] = df["Close time"].dt.tz_localize(open_times.tz)
+
+    return df
+
+
 def _align_dollar_bars_to_timeseries(
-    original_df: pd.DataFrame, raw_dollar_bars_df: pd.DataFrame, dollar_bar_size: float
+    ohlc_df: pd.DataFrame, dollar_bars: pd.DataFrame, dollar_bar_size: float
 ) -> pd.DataFrame:
     """
-    Aligns raw dollar bars to the original DataFrame's timeseries, forward-filling the data.
-    original_df must have a DatetimeIndex for this alignment.
-    All timestamps are in UTC.
+    Align dollar bars to the original timeseries using Close times (no lookahead, natural alignment).
+    For each timestamp in the original timeseries, the aligned DataFrame shows the most recent dollar bar
+    whose close time is less than or equal to the current timestamp's close time. This ensures the dollar bar close
+    appears in the minutely bar whose close time matches the dollar bar's close time (natural for plotting and analysis).
     """
-    if not isinstance(original_df.index, pd.DatetimeIndex):
-        raise ValueError(
-            "_align_dollar_bars_to_timeseries requires original_df to have a DatetimeIndex."
-        )
+    orig_index = ohlc_df.index
+    if ohlc_df.index.name == "Open time":
+        ohlc_df = ohlc_df.reset_index()
+    if dollar_bars.index.name == "Open time":
+        dollar_bars = dollar_bars.reset_index()
+    # Manufacture Close time for minutely data
+    if "Close time" not in ohlc_df.columns:
+        ohlc_df = _manufacture_close_time(ohlc_df)
+    if "Close time" not in dollar_bars.columns:
+        raise ValueError("Dollar bars must have 'Close time' column.")
 
-    # Determine prefix string using simplified number
-    prefix_val = _simplify_number(dollar_bar_size)
-    dollar_bar_prefix = f"db_{prefix_val}_"
-
-    if raw_dollar_bars_df.empty:
-        # If no dollar bars, create empty prefixed columns on the original_df
-        merged_df = original_df.copy()
-        # Define typical columns that would come from dollar bars
-        example_dollar_bar_cols = [
-            "Open time",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-            "Close time",
-        ]
-        for col_name in example_dollar_bar_cols:
-            merged_df[dollar_bar_prefix + col_name] = np.nan
-        merged_df[dollar_bar_prefix + "NewDBFlag"] = False
-        return merged_df
-
-    # Ensure both DataFrames have UTC timezone
-    original_df = original_df.copy()
-    if original_df.index.tz is None:
-        original_df.index = original_df.index.tz_localize("UTC")
-    else:
-        original_df.index = original_df.index.tz_convert("UTC")
-
-    dollar_bars_df_renamed = raw_dollar_bars_df.copy()
-    dollar_bars_df_renamed.columns = [
-        dollar_bar_prefix + col for col in dollar_bars_df_renamed.columns
+    db_cols = [
+        "Open",
+        "High",
+        "Low",
+        "Close",
+        "Volume",
+        "Open time",
+        "Close time",
+        "NewDBFlag",
     ]
-
-    # Set index for the dollar bars df for merging, using its own (prefixed) 'Open time'
-    open_time_col = dollar_bar_prefix + "Open time"
-    if pd.api.types.is_datetime64_any_dtype(dollar_bars_df_renamed[open_time_col]):
-        if dollar_bars_df_renamed[open_time_col].dt.tz is None:
-            dollar_bars_df_renamed[open_time_col] = dollar_bars_df_renamed[
-                open_time_col
-            ].dt.tz_localize("UTC")
-        else:
-            dollar_bars_df_renamed[open_time_col] = dollar_bars_df_renamed[
-                open_time_col
-            ].dt.tz_convert("UTC")
-    else:
-        dollar_bars_df_renamed[open_time_col] = pd.to_datetime(
-            dollar_bars_df_renamed[open_time_col]
-        ).dt.tz_localize("UTC")
-
-    # Handle potential duplicate timestamps in dollar bars
-    if dollar_bars_df_renamed[open_time_col].duplicated().any():
-        # Keep the first occurrence of each timestamp
-        dollar_bars_df_renamed = dollar_bars_df_renamed.loc[
-            ~dollar_bars_df_renamed[open_time_col].duplicated()
-        ]
-
-    # Set the index and merge
-    dollar_bars_df_renamed = dollar_bars_df_renamed.set_index(open_time_col, drop=False)
-    merged_df = original_df.merge(
-        dollar_bars_df_renamed, how="left", left_index=True, right_index=True
+    prefix = f"db_{_simplify_number(dollar_bar_size)}_"
+    dollar_bars_for_merge = dollar_bars[db_cols].copy()
+    dollar_bars_for_merge = dollar_bars_for_merge.rename(
+        columns={col: prefix + col for col in db_cols}
     )
+    dollar_bars_for_merge = dollar_bars_for_merge.sort_values(by=prefix + "Close time")
 
-    # Create NewDBFlag before forward-filling data columns
-    merged_df[dollar_bar_prefix + "NewDBFlag"] = ~merged_df[
-        dollar_bar_prefix + "Close"
-    ].isna()
+    # Merge asof on Close time (right), Close time (left)
+    aligned_df = pd.merge_asof(
+        ohlc_df.sort_index(),
+        dollar_bars_for_merge,
+        left_on="Close time",
+        right_on=prefix + "Close time",
+        direction="backward",
+    )
+    aligned_df.index = orig_index  # restore original index
 
-    # Identify only the newly added (prefixed) dollar bar columns to forward-fill
-    dollar_bar_derived_cols = [
-        col
-        for col in merged_df.columns
-        if col.startswith(dollar_bar_prefix) and col != dollar_bar_prefix + "NewDBFlag"
-    ]
-
-    # Use ffill() instead of fillna(method='ffill')
-    merged_df[dollar_bar_derived_cols] = merged_df[dollar_bar_derived_cols].ffill()
-
-    # Fill any remaining NaNs in NewDBFlag (e.g., at the start before any bar) with False
-    merged_df[dollar_bar_prefix + "NewDBFlag"] = merged_df[
-        dollar_bar_prefix + "NewDBFlag"
-    ].fillna(False)
-
-    return merged_df
+    return aligned_df
 
 
 @njit
@@ -726,6 +738,10 @@ def generate_dollar_bars(
         print("Using original Pandas version for raw dollar bar creation.")
         raw_bars = _create_raw_dollar_bars(ohlc_df, dollar_bar_size)
 
+    # Ensure 'NewDBFlag' is present before alignment
+    if "NewDBFlag" not in raw_bars.columns:
+        raw_bars["NewDBFlag"] = True
+
     if return_aligned_to_original_time:
         if raw_bars.empty:
             print(
@@ -750,9 +766,25 @@ def generate_dollar_bars(
         if "warnings" in description:
             for warning in description["warnings"]:
                 print(f"\nWarning: {warning}")
-        # Set index to 'Open time' if present
-        if "Open time" in raw_bars.columns:
-            raw_bars = raw_bars.set_index("Open time")
+        # Always keep 'Open time' as a column and as DatetimeIndex, and add 'NewDBFlag' for raw bars
+        if "Open time" not in raw_bars.columns:
+            raw_bars = raw_bars.reset_index()
+        raw_bars = raw_bars.set_index("Open time")
+        # Explicitly add 'Open time' back as a column
+        raw_bars["Open time"] = raw_bars.index
+        raw_bars["NewDBFlag"] = True
+        raw_bars = raw_bars[
+            [
+                "Open",
+                "High",
+                "Low",
+                "Close",
+                "Volume",
+                "Close time",
+                "NewDBFlag",
+                "Open time",
+            ]
+        ]
         return raw_bars
 
 
@@ -1052,6 +1084,57 @@ def _run_tests():
 
         print("\nAll mathematical correctness tests passed! ✅")
 
+    def test_close_time_alignment():
+        """Test that dollar bars are properly aligned using Close times."""
+        # Create test data with timezone-aware timestamps
+        df = create_test_data(1000)
+        df.index = pd.date_range(
+            start=pd.Timestamp("2024-01-01", tz="UTC"),
+            periods=len(df),
+            freq="1min",
+            tz="UTC",
+        )
+
+        # Generate dollar bars
+        dollar_bar_size = 1000.0
+        raw_bars = generate_dollar_bars(
+            df, dollar_bar_size, return_aligned_to_original_time=False, use_numba=True
+        )
+        aligned_bars = generate_dollar_bars(
+            df, dollar_bar_size, return_aligned_to_original_time=True, use_numba=True
+        )
+
+        # Test 1: Verify Close time manufacturing
+        assert "Close time" in df.columns, "Original DataFrame should have Close time"
+        assert all(
+            df["Close time"] == df.index + pd.Timedelta(seconds=59.999)
+        ), "Close times should be end of minute minus 1 microsecond"
+
+        # Test 2: Verify dollar bar Close times
+        for i in range(len(raw_bars) - 1):
+            assert raw_bars["Close time"].iloc[i] == raw_bars["Open time"].iloc[
+                i + 1
+            ] - pd.Timedelta(
+                microseconds=1
+            ), "Each bar's Close time should be next bar's Open time minus 1 microsecond"
+
+        # Test 3: Verify alignment uses Close times
+        prefix = f"db_{_simplify_number(dollar_bar_size)}_"
+        close_time_col = f"{prefix}Close time"
+
+        # For each aligned row, verify that the dollar bar data matches the last bar that closed before or at this row's Close time
+        for idx, row in aligned_bars.iterrows():
+            row_close_time = row["Close time"]
+            matching_bars = raw_bars[raw_bars["Close time"] <= row_close_time]
+            if not matching_bars.empty:
+                last_bar = matching_bars.iloc[-1]
+                for col in ["Open", "High", "Low", "Close", "Volume"]:
+                    assert (
+                        row[f"{prefix}{col}"] == last_bar[col]
+                    ), f"Aligned {col} should match last closed bar"
+
+        print("All Close time alignment tests passed! ✅")
+
     def test_alignment():
         """Test that dollar bars can be aligned to the original timeseries."""
         # Create test data with timezone-aware timestamps
@@ -1096,7 +1179,93 @@ def _run_tests():
                     not aligned_bars[col].isna().any()
                 ), f"Column {col} has missing values"
 
+        # Test Close time alignment
+        prefix = f"db_{_simplify_number(1000.0)}_"
+        close_time_col = f"{prefix}Close time"
+        assert (
+            close_time_col in aligned_bars.columns
+        ), "Aligned DataFrame should have Close time column"
+
+        # Verify that Close times are properly aligned
+        for i in range(len(aligned_bars) - 1):
+            current_close = aligned_bars[close_time_col].iloc[i]
+            next_close = aligned_bars[close_time_col].iloc[i + 1]
+            assert (
+                current_close <= next_close
+            ), "Close times should be in ascending order"
+
         print("All alignment tests passed! ✅")
+
+    def test_no_lookahead_in_dollar_bars():
+        """Test that there is no lookahead: Close time of bar n < Open time of bar n+1, and prices are not forward-filled prematurely."""
+        df = create_test_data(20)
+        df.index = pd.date_range(
+            start=pd.Timestamp("2024-01-01", tz="UTC"),
+            periods=len(df),
+            freq="1min",
+            tz="UTC",
+        )
+        dollar_bar_size = 1000.0
+        raw_bars = generate_dollar_bars(
+            df, dollar_bar_size, return_aligned_to_original_time=False, use_numba=True
+        )
+        print("\nFirst 5 dollar bars (Open/Close times and prices):")
+        for i in range(min(5, len(raw_bars))):
+            print(
+                f"Bar {i}: Open time: {raw_bars['Open time'].iloc[i]}, Close time: {raw_bars['Close time'].iloc[i]}, Open: {raw_bars['Open'].iloc[i]:.2f}, Close: {raw_bars['Close'].iloc[i]:.2f}"
+            )
+        # Check that Close time of bar n is exactly Open time of bar n+1 minus 1 microsecond
+        for i in range(len(raw_bars) - 1):
+            close_time = raw_bars["Close time"].iloc[i]
+            next_open_time = raw_bars["Open time"].iloc[i + 1]
+            assert close_time == next_open_time - pd.Timedelta(
+                microseconds=1
+            ), f"Bar {i} Close time {close_time} is not 1 microsecond before next Open time {next_open_time}"
+        print("No lookahead in dollar bar sequence. Close/Open times are correct.")
+
+    def test_no_lookahead_in_alignment():
+        """Test that the aligned DataFrame never shows a dollar bar's values before its close time."""
+        df = create_test_data(100)
+        df.index = pd.date_range(
+            start=pd.Timestamp("2024-01-01", tz="UTC"),
+            periods=len(df),
+            freq="1min",
+            tz="UTC",
+        )
+        dollar_bar_size = 1000.0
+        aligned_bars = generate_dollar_bars(
+            df, dollar_bar_size, return_aligned_to_original_time=True, use_numba=True
+        )
+        prefix = f"db_{_simplify_number(dollar_bar_size)}_"
+        close_time_col = f"{prefix}Close time"
+
+        # For each row, verify that no dollar bar values are shown before their close time
+        for i, (idx, row) in enumerate(aligned_bars.iterrows()):
+            if pd.isna(row[close_time_col]):
+                continue
+            # Check if current row shows a dollar bar that hasn't closed yet
+            assert row[close_time_col] <= idx, (
+                f"Lookahead bias detected at {idx}: "
+                f"Dollar bar close time {row[close_time_col]} is after current time"
+            )
+
+            # Verify that the dollar bar values are consistent with the last closed bar
+            if i > 0:
+                prev_row = aligned_bars.iloc[i - 1]
+                if not pd.isna(prev_row[close_time_col]):
+                    # If previous bar is still open, current values should match previous
+                    if prev_row[close_time_col] > idx:
+                        for col in ["Open", "High", "Low", "Close", "Volume"]:
+                            assert (
+                                row[f"{prefix}{col}"] == prev_row[f"{prefix}{col}"]
+                            ), (
+                                f"Value mismatch at {idx} for {col}: "
+                                f"Current {row[f'{prefix}{col}']} != Previous {prev_row[f'{prefix}{col}']}"
+                            )
+
+        print(
+            "No lookahead bias detected in alignment. All dollar bar values are properly aligned."
+        )
 
     def test_edge_cases():
         """Test edge cases like empty DataFrames and extreme values."""
@@ -1177,7 +1346,10 @@ def _run_tests():
     print("\nRunning tests...")
     test_basic_functionality()
     test_dollar_bar_size()
+    test_close_time_alignment()
     test_alignment()
+    test_no_lookahead_in_dollar_bars()
+    test_no_lookahead_in_alignment()
     test_edge_cases()
     test_consistency()
     print("All tests passed! ✅")

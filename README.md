@@ -102,6 +102,18 @@ When `return_aligned_to_original_time=True`, the output DataFrame will have colu
 - `db_96M_Close time`: Bar end time (last included minute, or the open time of the next bar minus one microsecond)
 - `db_96M_NewDBFlag`: True when a new dollar bar starts
 
+### Important Note on Time Alignment
+
+When aligning dollar bars to the original timeseries (`return_aligned_to_original_time=True`), the package uses **Close time** alignment rather than Open time alignment. This is important because:
+
+1. **Avoids Lookahead Bias**: Using Close time ensures that each aligned row represents the state of the market at the end of the bar, which is more intuitive for financial analysis.
+2. **Consistent with Event-Based Nature**: Dollar bars are event-based (formed when a certain dollar volume is reached), so aligning on Close time better represents when the information becomes available.
+3. **Manufactured Close Times**: For the original timeseries, Close times are automatically manufactured:
+   - For time-based data (e.g., minutely): Close time = Open time + period - 1 microsecond
+   - For event-based data: Close time = Open time
+
+This alignment strategy ensures that your analysis won't accidentally use future information when working with the aligned data.
+
 When `return_aligned_to_original_time=False`, the returned DataFrame is indexed by `Open time` and contains only the actual dollar bars (no forward-filling). This is ideal for event-based analysis and indicator application.
 
 ### Column Prefix Simplification
