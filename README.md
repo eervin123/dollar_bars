@@ -51,7 +51,7 @@ dollar_bars = generate_dollar_bars(
 Your input DataFrame must have:
 
 - Required columns: 'Open', 'High', 'Low', 'Close', 'Volume'
-- Either a DatetimeIndex or an 'Open Time' column
+- Either a DatetimeIndex or an 'Open time' column
 - All timestamps should be in UTC
 
 ### 2. Creating Dollar Bars
