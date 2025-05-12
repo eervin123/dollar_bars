@@ -29,6 +29,7 @@ def main():
     print("Created vbt.Data object from dollar bars. Now creating BBands...")
     time_slice = slice("2021-01-01", "2021-01-20")
     bbands = data[time_slice].run("bbands")
+    
     fig = bbands.plot(title="BTC BBands Based on 1B Dollar Bars")
     fig = df.Close.loc[time_slice].vbt.plot(
         title="BTC Close Price",
