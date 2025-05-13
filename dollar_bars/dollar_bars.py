@@ -661,7 +661,7 @@ def generate_dollar_bars(
     ohlc_df: pd.DataFrame,
     dollar_bar_size: float,
     return_aligned_to_original_time: bool = True,
-    use_numba: bool = False,
+    use_numba: bool = True,
 ) -> pd.DataFrame:
     """
     Generates dollar bars from OHLCV data.
